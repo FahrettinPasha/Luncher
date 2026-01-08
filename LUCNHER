@@ -4,180 +4,201 @@ import zipfile
 import io
 import os
 import threading
-import sys
 import platform
 import subprocess
 import logging
 import urllib3
 import shutil
+import time
 
-# ---- SSL WARNING KAPAT ----
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ---- WINDOWS KONTROLÜ ----
 if platform.system() != "Windows":
-    raise SystemExit("This launcher is Windows-only.")
+    raise SystemExit("Windows only")
 
-# ---- SABİTLER ----
 APP_NAME = "Infinite Dash Runner"
-# NOT: Bu URL GitHub'da "404 Not Found" veriyor. 
-# Depona gidip 'version.json' adında bir dosya oluşturmalı ve içine şunu yazmalısın:
-# {"version": "1.0.0", "zip_url": "https://github.com/FahrettinPasha/Infinite-Dash-Runner-Pygame/archive/refs/heads/main.zip"}
 VERSION_URL = "https://raw.githubusercontent.com/FahrettinPasha/Infinite-Dash-Runner-Pygame/main/version.json"
+FALLBACK_ZIP = "https://github.com/FahrettinPasha/Infinite-Dash-Runner-Pygame/archive/refs/heads/main.zip"
 
 BASE_DIR = os.path.join(os.getenv("APPDATA"), "PashaGames", "InfiniteDash")
 GAME_DIR = os.path.join(BASE_DIR, "game")
 VERSION_FILE = os.path.join(BASE_DIR, "version.txt")
 LOG_FILE = os.path.join(BASE_DIR, "install.log")
 
-# ---- KLASÖRLER ----
-os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(GAME_DIR, exist_ok=True)
 
-# ---- LOGGING (ESKİ DETAYLI HALİ) ----
 logging.basicConfig(
     filename=LOG_FILE,
-    level=logging.ERROR,
+    level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-if not os.path.exists(LOG_FILE):
-    with open(LOG_FILE, "w", encoding="utf-8") as f:
-        f.write("=== Infinite Dash Runner Install Log ===\n")
-
-# ---- LAUNCHER ----
 class Launcher(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title(APP_NAME)
-        self.geometry("520x480")
+        self.geometry("600x550")
         self.resizable(False, False)
 
-        ctk.CTkLabel(self, text=APP_NAME, font=("Arial", 26, "bold")).pack(pady=25)
+        ctk.CTkLabel(self, text=APP_NAME, font=("Arial", 26, "bold")).pack(pady=10)
 
-        self.status = ctk.CTkLabel(self, text="Hazır", text_color="white")
-        self.status.pack(pady=5)
+        # Scrollable Text widget
+        self.log_text = ctk.CTkTextbox(self, width=560, height=380)
+        self.log_text.pack(padx=10, pady=10)
+        self.log_text.configure(state="disabled")  # sadece yazma
 
-        self.progress = ctk.CTkProgressBar(self, width=420)
-        self.progress.set(0)
-        self.progress.pack(pady=20)
+        self.start_btn = ctk.CTkButton(self, text="Başlat", width=200, command=self.start)
+        self.start_btn.pack(pady=5)
 
-        self.start_btn = ctk.CTkButton(
-            self,
-            text="OYUNU BAŞLAT",
-            width=260,
-            height=60,
-            font=("Arial", 16, "bold"),
-            command=self.start
-        )
-        self.start_btn.pack(pady=15)
+        self.stop_btn = ctk.CTkButton(self, text="Durdur", width=200, fg_color="red", command=self.stop)
+        self.stop_btn.pack(pady=5)
 
-        self.log_btn = ctk.CTkButton(
-            self,
-            text="INSTALL LOG AÇ",
-            width=200,
-            height=40,
-            fg_color="#444",
-            hover_color="#666",
-            command=self.open_log
-        )
-        self.log_btn.pack(pady=5)
+        self.stop_flag = threading.Event()
 
-    def ui(self, text, color="white", value=None):
-        self.after(0, lambda: self.status.configure(text=text, text_color=color))
-        if value is not None:
-            self.after(0, lambda: self.progress.set(value))
-
-    def open_log(self):
-        try:
-            subprocess.Popen(["notepad.exe", LOG_FILE])
-        except Exception:
-            logging.error("Log açılamadı", exc_info=True)
-            os.startfile(BASE_DIR)
+    def log(self, msg):
+        """Log penceresine yaz"""
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", f"[{timestamp}] {msg}\n")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+        logging.info(msg)
 
     def start(self):
+        self.stop_flag.clear()
         self.start_btn.configure(state="disabled")
         threading.Thread(target=self.run, daemon=True).start()
+
+    def stop(self):
+        self.stop_flag.set()
+        self.log("=== İşlem durduruldu ===")
+        self.start_btn.configure(state="normal")
 
     def run(self):
         try:
             self.check_update()
+            if self.stop_flag.is_set():
+                self.log("İşlem kullanıcı tarafından durduruldu. Oyun başlatılmayacak.")
+                return
             self.launch_game()
-        except Exception:
-            logging.error("Launcher error", exc_info=True)
-            self.ui("Hata oluştu. install.log kontrol edin.", "red")
-        finally:
-            self.after(0, lambda: self.start_btn.configure(state="normal"))
+        except Exception as e:
+            self.log(f"HATA: {e}")
+            self.start_btn.configure(state="normal")
 
     def check_update(self):
-        self.ui("Güncellemeler kontrol ediliyor...", "yellow", 0.1)
+        self.log("GitHub ile bağlantı kontrol ediliyor...")
+        if self.stop_flag.is_set(): return
 
-        # SSL doğrulaması devre dışı bırakıldı
-        r = requests.get(VERSION_URL, timeout=15, verify=False)
-        
-        if r.status_code == 404:
-            # Eğer version.json yoksa, direkt senin verdiğin ZIP'i indirmeyi dene (Zorunlu Güncelleme)
-            self.ui("Versiyon bulunamadı, zorunlu indirme yapılıyor...", "orange")
-            zip_url = "https://github.com/FahrettinPasha/Infinite-Dash-Runner-Pygame/archive/refs/heads/main.zip"
-            self.download_update(zip_url, "1.0.0")
+        try:
+            r = requests.get(VERSION_URL, timeout=15, verify=False)
+            if r.status_code == 404:
+                self.log("version.json bulunamadı. Fallback ZIP kullanılacak.")
+                self.download(FALLBACK_ZIP, "1.0.0")
+                return
+            r.raise_for_status()
+            data = r.json()
+            remote_version = data.get("version", "1.0.0")
+            zip_url = data.get("zip_url", FALLBACK_ZIP)
+        except Exception as e:
+            self.log(f"Versiyon alınamadı: {e}")
+            self.download(FALLBACK_ZIP, "1.0.0")
             return
-
-        r.raise_for_status()
-        data = r.json()
-        remote_version = data["version"]
-        zip_url = data["zip_url"]
 
         local_version = "0.0.0"
         if os.path.exists(VERSION_FILE):
-            with open(VERSION_FILE, "r", encoding="utf-8") as f:
+            with open(VERSION_FILE, "r") as f:
                 local_version = f.read().strip()
+        self.log(f"Yerel versiyon: {local_version}, Uzaktaki versiyon: {remote_version}")
 
         if remote_version != local_version:
-            self.download_update(zip_url, remote_version)
+            self.log("Yeni versiyon bulundu. İndiriliyor...")
+            self.download(zip_url, remote_version)
         else:
-            self.ui("Oyun güncel", "green", 0.3)
+            self.log("Oyun güncel. Kurulum gerekli değil.")
 
-    def download_update(self, url, version):
-        self.ui("Oyun indiriliyor...", "orange", 0.4)
+    def download(self, url, version):
+        if self.stop_flag.is_set(): return
 
-        r = requests.get(url, timeout=60, verify=False)
-        r.raise_for_status()
+        self.log(f"ZIP indiriliyor: {url}")
+        try:
+            r = requests.get(url, stream=True, timeout=60, verify=False)
+            total = int(r.headers.get("content-length", 0))
+            chunk_size = 8192
+            downloaded = 0
+            data = io.BytesIO()
 
-        self.ui("Dosyalar kuruluyor...", "cyan", 0.7)
+            for chunk in r.iter_content(chunk_size=chunk_size):
+                if self.stop_flag.is_set():
+                    self.log("İndirme durduruldu.")
+                    return
+                if chunk:
+                    data.write(chunk)
+                    downloaded += len(chunk)
+                    percent = downloaded / total * 100 if total else 0
+                    self.log(f"İndiriliyor: {downloaded}/{total} byte ({percent:.1f}%)")
+            self.log("ZIP indirildi. Kurulum başlatılıyor...")
+        except Exception as e:
+            self.log(f"ZIP indirilemedi: {e}")
+            raise
 
-        # Eski klasörü tamamen temizle
+        # Eski oyun klasörünü temizle
         if os.path.exists(GAME_DIR):
-            shutil.rmtree(GAME_DIR)
+            self.log(f"Eski oyun klasörü temizleniyor: {GAME_DIR}")
+            shutil.rmtree(GAME_DIR, ignore_errors=True)
+            time.sleep(0.5)
         os.makedirs(GAME_DIR, exist_ok=True)
 
-        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-            z.extractall(GAME_DIR)
+        # ZIP aç
+        if self.stop_flag.is_set(): return
+        try:
+            data.seek(0)
+            with zipfile.ZipFile(data) as z:
+                self.log("ZIP içeriği açılıyor...")
+                z.extractall(GAME_DIR)
+            self.log("Kurulum tamamlandı.")
+        except Exception as e:
+            self.log(f"ZIP açılamadı: {e}")
+            raise
 
-        with open(VERSION_FILE, "w", encoding="utf-8") as f:
+        # Versiyon dosyası yaz
+        with open(VERSION_FILE, "w") as f:
             f.write(version)
+        self.log(f"Versiyon kaydedildi: {version}")
 
-        self.ui("Yükleme tamamlandı", "green", 1.0)
+    def find_python(self):
+        import shutil
+        py = shutil.which("python") or shutil.which("python3")
+        if not py:
+            raise RuntimeError("Python bulunamadı. Oyunu başlatmak için Python gerekli.")
+        return py
 
     def launch_game(self):
-        # main.py dosyasını klasör yapısı ne olursa olsun bulur
-        main_py_path = None
+        if self.stop_flag.is_set():
+            self.log("Oyun başlatma iptal edildi.")
+            return
+
+        main_py = None
         for root, dirs, files in os.walk(GAME_DIR):
             if "main.py" in files:
-                main_py_path = os.path.join(root, "main.py")
+                main_py = os.path.join(root, "main.py")
                 break
 
-        if not main_py_path:
-            raise FileNotFoundError("main.py bulunamadı. ZIP içeriğini kontrol edin.")
+        if not main_py:
+            raise RuntimeError("main.py bulunamadı!")
 
-        self.ui("Oyun başlatılıyor...", "green", 1.0)
+        python = self.find_python()
+        self.log(f"Oyun başlatılıyor: {main_py} (Python: {python})")
 
-        subprocess.Popen(
-            [sys.executable, main_py_path],
-            cwd=os.path.dirname(main_py_path),
-            creationflags=subprocess.CREATE_NEW_CONSOLE
-        )
+        try:
+            subprocess.Popen([python, main_py], cwd=os.path.dirname(main_py))
+            self.log("Oyun process başlatıldı.")
+        except Exception as e:
+            self.log(f"Oyun başlatılamadı: {e}")
+            raise
 
-        self.after(1500, self.destroy)
+        self.log("Launcher kapanıyor...")
+        self.after(1000, self.destroy)
+
 
 if __name__ == "__main__":
     Launcher().mainloop()
